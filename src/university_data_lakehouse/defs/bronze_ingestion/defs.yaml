@@ -1,0 +1,43 @@
+type: university_data_lakehouse.components.s3_data_landing_component.S3DataLandingComponent
+
+attributes:
+  s3_bucket: university-data-lakehouse
+  s3_landing_prefix: landing/
+  s3_bronze_prefix: bronze/
+  aws_region: us-east-1
+  demo_mode: true
+  sensor_interval_seconds: 60
+  source_systems:
+    - name: peoplesoft
+      description: "PeopleSoft Campus Solutions (Student Information System)"
+      s3_prefix: peoplesoft/
+      tables:
+        - students
+        - enrollments
+        - courses
+        - financial_aid
+
+    - name: sap
+      description: "SAP ERP (Finance & Human Resources)"
+      s3_prefix: sap/
+      tables:
+        - general_ledger
+        - cost_centers
+        - employees
+
+    - name: salesforce
+      description: "Salesforce CRM (Admissions & Alumni Relations)"
+      s3_prefix: salesforce/
+      tables:
+        - contacts
+        - opportunities
+        - campaigns
+
+    - name: highered
+      description: "Higher-Ed Operational Systems (Housing, Athletics, Conduct, Placements)"
+      s3_prefix: highered/
+      tables:
+        - housing_assignments
+        - athletics_rosters
+        - student_conduct
+        - field_placements

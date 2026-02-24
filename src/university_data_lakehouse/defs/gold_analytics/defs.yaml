@@ -1,0 +1,131 @@
+type: university_data_lakehouse.components.gold_analytics_component.GoldAnalyticsComponent
+
+attributes:
+  trino_host: trino.university-lakehouse.internal
+  trino_port: 8443
+  trino_catalog: iceberg
+  trino_schema: gold
+  s3_warehouse: "s3://university-data-lakehouse/warehouse/"
+  glue_database: university_gold
+  demo_mode: true
+  openmetadata_host: ""
+  models:
+    - name: enrollment_metrics
+      description: "Student enrollment KPIs by term, program, and academic level"
+      source_assets:
+        - silver/fact_enrollments
+        - silver/dim_students
+        - silver/dim_courses
+      iceberg_table: enrollment_metrics
+      openmetadata_tags:
+        - "PII:None"
+        - "Domain:Registrar"
+        - "Tier:Gold"
+      trino_sql: |
+        SELECT
+            fe.term_code,
+            ds.program_code,
+            ds.academic_level,
+            COUNT(DISTINCT fe.student_id) AS total_enrolled,
+            SUM(fe.credits) AS total_credits,
+            AVG(ds.current_gpa) AS avg_gpa,
+            CAST(
+                COUNT(DISTINCT CASE WHEN fe.enrollment_status = 'Active' THEN fe.student_id END) AS DOUBLE
+            ) / NULLIF(COUNT(DISTINCT fe.student_id), 0) AS retention_rate,
+            COUNT(DISTINCT CASE WHEN ds.is_athlete THEN fe.student_id END) AS athlete_count,
+            CAST(COUNT(*) AS DOUBLE) / NULLIF(COUNT(DISTINCT fe.course_id), 0) AS avg_class_size
+        FROM iceberg.silver.fact_enrollments fe
+        JOIN iceberg.silver.dim_students ds ON fe.student_id = ds.student_id
+        JOIN iceberg.silver.dim_courses dc ON fe.course_id = dc.course_id
+        GROUP BY fe.term_code, ds.program_code, ds.academic_level
+      output_columns:
+        - { name: term_code, type: string, description: "Academic term (e.g. 2024FA)" }
+        - { name: program_code, type: string, description: "Academic program code" }
+        - { name: academic_level, type: string, description: "UG/GR/PHD" }
+        - { name: total_enrolled, type: int, description: "Distinct enrolled students" }
+        - { name: total_credits, type: float, description: "Sum of credit hours" }
+        - { name: avg_gpa, type: float, description: "Average GPA" }
+        - { name: retention_rate, type: float, description: "Term-over-term retention rate" }
+        - { name: athlete_count, type: int, description: "Student athletes enrolled" }
+        - { name: avg_class_size, type: float, description: "Average section enrollment" }
+
+    - name: financial_aid_analytics
+      description: "Financial aid distribution analysis by program, aid type, and funding source"
+      source_assets:
+        - silver/fact_enrollments
+        - silver/dim_students
+        - silver/fact_financial_transactions
+      iceberg_table: financial_aid_analytics
+      openmetadata_tags:
+        - "PII:Aggregated"
+        - "Domain:FinancialAid"
+        - "Tier:Gold"
+      trino_sql: |
+        SELECT
+            fe.term_code AS aid_year,
+            'Combined' AS aid_type,
+            ds.program_code,
+            COUNT(DISTINCT fe.student_id) AS total_students,
+            SUM(fe.aid_amount) AS total_offered,
+            SUM(fe.aid_amount) * 0.92 AS total_disbursed,
+            AVG(fe.aid_amount) AS avg_aid_per_student,
+            CAST(SUM(fe.aid_amount) AS DOUBLE) / NULLIF(SUM(ABS(ft.amount)), 0) AS budget_utilization,
+            ft.department_name AS cost_center_name
+        FROM iceberg.silver.fact_enrollments fe
+        JOIN iceberg.silver.dim_students ds ON fe.student_id = ds.student_id
+        LEFT JOIN iceberg.silver.fact_financial_transactions ft
+            ON fe.term_code = CAST(YEAR(ft.posting_date) AS VARCHAR)
+        WHERE fe.aid_amount > 0
+        GROUP BY fe.term_code, ds.program_code, ft.department_name
+      output_columns:
+        - { name: aid_year, type: string, description: "Financial aid year" }
+        - { name: aid_type, type: string, description: "Aid category" }
+        - { name: program_code, type: string }
+        - { name: total_students, type: int, description: "Students receiving aid" }
+        - { name: total_offered, type: float }
+        - { name: total_disbursed, type: float }
+        - { name: avg_aid_per_student, type: float }
+        - { name: budget_utilization, type: float, description: "% of budget used" }
+        - { name: cost_center_name, type: string }
+
+    - name: admissions_funnel
+      description: "Admissions pipeline metrics from inquiry through enrollment with campaign attribution"
+      source_assets:
+        - silver/fact_admissions_contacts
+      iceberg_table: admissions_funnel
+      openmetadata_tags:
+        - "PII:None"
+        - "Domain:Admissions"
+        - "Tier:Gold"
+      trino_sql: |
+        SELECT
+            COALESCE(program_interest, 'Undeclared') AS program_interest,
+            'Current' AS term_code,
+            COUNT(CASE WHEN funnel_stage = 'Inquiry' THEN 1 END) AS inquiries,
+            COUNT(CASE WHEN funnel_stage = 'Application' THEN 1 END) AS applications,
+            COUNT(CASE WHEN funnel_stage = 'Admitted' THEN 1 END) AS admits,
+            COUNT(CASE WHEN funnel_stage = 'Deposited' THEN 1 END) AS deposits,
+            COUNT(CASE WHEN funnel_stage = 'Enrolled' THEN 1 END) AS enrolled,
+            CAST(COUNT(CASE WHEN funnel_stage = 'Enrolled' THEN 1 END) AS DOUBLE)
+                / NULLIF(COUNT(CASE WHEN funnel_stage = 'Admitted' THEN 1 END), 0) AS yield_rate,
+            CAST(
+                COUNT(CASE WHEN funnel_stage = 'Deposited' THEN 1 END)
+                - COUNT(CASE WHEN funnel_stage = 'Enrolled' THEN 1 END) AS DOUBLE
+            ) / NULLIF(COUNT(CASE WHEN funnel_stage = 'Deposited' THEN 1 END), 0) AS melt_rate,
+            (SELECT campaign_name FROM iceberg.silver.fact_admissions_contacts
+             GROUP BY campaign_name ORDER BY COUNT(*) DESC LIMIT 1) AS top_campaign,
+            SUM(expected_revenue) AS expected_tuition_revenue
+        FROM iceberg.silver.fact_admissions_contacts
+        GROUP BY program_interest
+      output_columns:
+        - { name: term_code, type: string }
+        - { name: program_interest, type: string }
+        - { name: inquiries, type: int }
+        - { name: applications, type: int }
+        - { name: admits, type: int }
+        - { name: deposits, type: int }
+        - { name: enrolled, type: int }
+        - { name: yield_rate, type: float, description: "Admits to Enrolled conversion" }
+        - { name: melt_rate, type: float, description: "Deposited to Not Enrolled percent" }
+        - { name: top_campaign, type: string }
+        - { name: expected_tuition_revenue, type: float }

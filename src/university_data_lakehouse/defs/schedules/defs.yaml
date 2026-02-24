@@ -1,0 +1,43 @@
+type: university_data_lakehouse.components.scheduled_job_component.ScheduledJobComponent
+
+attributes:
+  jobs:
+    - name: bronze_nightly_ingestion
+      cron_schedule: "0 2 * * *"
+      asset_selection: "group:bronze_ingestion"
+      description: "Nightly full ingestion of all source systems into bronze layer at 2am ET"
+      default_status: RUNNING
+      execution_timezone: US/Eastern
+      tags:
+        layer: bronze
+        pipeline: ingestion
+
+    - name: silver_daily_transforms
+      cron_schedule: "0 4 * * *"
+      asset_selection: "group:silver_transforms"
+      description: "Daily Trino/Iceberg transformations into silver layer at 4am ET"
+      default_status: RUNNING
+      execution_timezone: US/Eastern
+      tags:
+        layer: silver
+        pipeline: transform
+
+    - name: gold_daily_analytics
+      cron_schedule: "0 6 * * *"
+      asset_selection: "group:gold_analytics"
+      description: "Daily gold analytics model refresh at 6am ET"
+      default_status: RUNNING
+      execution_timezone: US/Eastern
+      tags:
+        layer: gold
+        pipeline: analytics
+
+    - name: admissions_hourly_refresh
+      cron_schedule: "0 * * * *"
+      asset_selection: "tag:source_system=salesforce | key:silver/fact_admissions_contacts | key:gold/admissions_funnel"
+      description: "Hourly refresh of admissions pipeline data during business hours"
+      default_status: STOPPED
+      execution_timezone: US/Eastern
+      tags:
+        layer: all
+        pipeline: admissions

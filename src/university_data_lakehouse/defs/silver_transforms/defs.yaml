@@ -1,0 +1,220 @@
+type: university_data_lakehouse.components.trino_iceberg_transform_component.TrinoIcebergTransformComponent
+
+attributes:
+  trino_host: trino.university-lakehouse.internal
+  trino_port: 8443
+  trino_catalog: iceberg
+  trino_schema: silver
+  s3_warehouse: "s3://university-data-lakehouse/warehouse/"
+  glue_database: university_silver
+  demo_mode: true
+  transforms:
+    - name: dim_students
+      description: "Student dimension - conformed from PeopleSoft, housing, and athletics"
+      source_assets:
+        - bronze/peoplesoft_students
+        - bronze/highered_housing_assignments
+        - bronze/highered_athletics_rosters
+      data_quality_checks:
+        - not_null_pk
+        - no_duplicates
+      iceberg_table: dim_students
+      trino_sql: |
+        SELECT
+            CAST(UUID() AS VARCHAR) AS student_key,
+            s.student_id,
+            s.first_name || ' ' || s.last_name AS full_name,
+            s.email,
+            s.date_of_birth,
+            s.program_code,
+            s.academic_level,
+            s.gpa AS current_gpa,
+            s.enrollment_status,
+            COALESCE(h.building_code, 'Off-Campus') AS housing_status,
+            CASE WHEN a.student_id IS NOT NULL THEN true ELSE false END AS is_athlete,
+            s.admission_date
+        FROM iceberg.bronze.peoplesoft_students s
+        LEFT JOIN iceberg.bronze.highered_housing_assignments h
+            ON s.student_id = h.student_id
+        LEFT JOIN (
+            SELECT DISTINCT student_id
+            FROM iceberg.bronze.highered_athletics_rosters
+        ) a ON s.student_id = a.student_id
+      output_columns:
+        - { name: student_key, type: string, description: "Surrogate key" }
+        - { name: student_id, type: string, description: "Natural key from PeopleSoft" }
+        - { name: full_name, type: string, description: "Concatenated first + last name" }
+        - { name: email, type: string }
+        - { name: date_of_birth, type: date }
+        - { name: program_code, type: string }
+        - { name: academic_level, type: string, description: "UG/GR/PHD" }
+        - { name: current_gpa, type: float }
+        - { name: enrollment_status, type: string }
+        - { name: housing_status, type: string }
+        - { name: is_athlete, type: boolean }
+        - { name: admission_date, type: date }
+
+    - name: dim_courses
+      description: "Course dimension from PeopleSoft catalog"
+      source_assets:
+        - bronze/peoplesoft_courses
+      data_quality_checks:
+        - not_null_pk
+      iceberg_table: dim_courses
+      trino_sql: |
+        SELECT
+            CAST(UUID() AS VARCHAR) AS course_key,
+            course_id,
+            course_name,
+            department_code,
+            credits,
+            course_level,
+            max_enrollment
+        FROM iceberg.bronze.peoplesoft_courses
+      output_columns:
+        - { name: course_key, type: string, description: "Surrogate key" }
+        - { name: course_id, type: string }
+        - { name: course_name, type: string }
+        - { name: department_code, type: string }
+        - { name: credits, type: float }
+        - { name: course_level, type: string }
+        - { name: max_enrollment, type: int }
+
+    - name: dim_employees
+      description: "Employee dimension from SAP HR with cost center enrichment"
+      source_assets:
+        - bronze/sap_employees
+        - bronze/sap_cost_centers
+      data_quality_checks:
+        - not_null_pk
+        - no_duplicates
+      iceberg_table: dim_employees
+      trino_sql: |
+        SELECT
+            CAST(UUID() AS VARCHAR) AS employee_key,
+            e.employee_id,
+            e.first_name || ' ' || e.last_name AS full_name,
+            e.department,
+            e.position_title,
+            e.employee_type,
+            cc.cost_center_id AS cost_center
+        FROM iceberg.bronze.sap_employees e
+        LEFT JOIN iceberg.bronze.sap_cost_centers cc
+            ON e.department = cc.department
+      output_columns:
+        - { name: employee_key, type: string }
+        - { name: employee_id, type: string }
+        - { name: full_name, type: string }
+        - { name: department, type: string }
+        - { name: position_title, type: string }
+        - { name: employee_type, type: string }
+        - { name: cost_center, type: string }
+
+    - name: fact_enrollments
+      description: "Enrollment fact table joining students, courses, and financial aid"
+      source_assets:
+        - bronze/peoplesoft_enrollments
+        - bronze/peoplesoft_financial_aid
+      data_quality_checks:
+        - not_null_pk
+        - row_count
+        - referential_integrity
+      iceberg_table: fact_enrollments
+      trino_sql: |
+        SELECT
+            CAST(UUID() AS VARCHAR) AS enrollment_key,
+            e.student_id,
+            e.course_id,
+            e.term_code,
+            e.enrollment_date,
+            e.grade,
+            e.credits,
+            e.enrollment_status,
+            COALESCE(fa.amount_disbursed, 0.0) AS aid_amount
+        FROM iceberg.bronze.peoplesoft_enrollments e
+        LEFT JOIN iceberg.bronze.peoplesoft_financial_aid fa
+            ON e.student_id = fa.student_id
+            AND e.term_code = fa.aid_year
+      output_columns:
+        - { name: enrollment_key, type: string }
+        - { name: student_id, type: string }
+        - { name: course_id, type: string }
+        - { name: term_code, type: string }
+        - { name: enrollment_date, type: date }
+        - { name: grade, type: string }
+        - { name: credits, type: float }
+        - { name: enrollment_status, type: string }
+        - { name: aid_amount, type: float, description: "Financial aid disbursed for term" }
+
+    - name: fact_financial_transactions
+      description: "Financial transaction facts from SAP GL with cost center enrichment"
+      source_assets:
+        - bronze/sap_general_ledger
+        - bronze/sap_cost_centers
+      data_quality_checks:
+        - row_count
+        - value_range
+      iceberg_table: fact_financial_transactions
+      trino_sql: |
+        SELECT
+            CAST(UUID() AS VARCHAR) AS transaction_key,
+            gl.document_number,
+            gl.posting_date,
+            gl.gl_account,
+            gl.cost_center,
+            gl.fund_code,
+            gl.amount,
+            cc.department AS department_name,
+            cc.college
+        FROM iceberg.bronze.sap_general_ledger gl
+        LEFT JOIN iceberg.bronze.sap_cost_centers cc
+            ON gl.cost_center = cc.cost_center_id
+      output_columns:
+        - { name: transaction_key, type: string }
+        - { name: document_number, type: string }
+        - { name: posting_date, type: date }
+        - { name: gl_account, type: string }
+        - { name: cost_center, type: string }
+        - { name: fund_code, type: string }
+        - { name: amount, type: float }
+        - { name: department_name, type: string }
+        - { name: college, type: string }
+
+    - name: fact_admissions_contacts
+      description: "Admissions CRM contacts with funnel stage and campaign attribution"
+      source_assets:
+        - bronze/salesforce_contacts
+        - bronze/salesforce_opportunities
+        - bronze/salesforce_campaigns
+      data_quality_checks:
+        - not_null_pk
+        - row_count
+      iceberg_table: fact_admissions_contacts
+      trino_sql: |
+        SELECT
+            CAST(UUID() AS VARCHAR) AS contact_key,
+            c.contact_id,
+            c.first_name || ' ' || c.last_name AS full_name,
+            c.email,
+            c.contact_type,
+            c.lead_source,
+            o.stage_name AS funnel_stage,
+            o.program_interest,
+            COALESCE(o.amount, 0.0) AS expected_revenue,
+            camp.campaign_name
+        FROM iceberg.bronze.salesforce_contacts c
+        LEFT JOIN iceberg.bronze.salesforce_opportunities o
+            ON c.contact_id = o.contact_id
+        LEFT JOIN iceberg.bronze.salesforce_campaigns camp
+            ON o.opportunity_id = camp.campaign_id
+      output_columns:
+        - { name: contact_key, type: string }
+        - { name: contact_id, type: string }
+        - { name: full_name, type: string }
+        - { name: email, type: string }
+        - { name: contact_type, type: string }
+        - { name: lead_source, type: string }
+        - { name: funnel_stage, type: string }
+        - { name: program_interest, type: string }
+        - { name: expected_revenue, type: float }
+        - { name: campaign_name, type: string }
