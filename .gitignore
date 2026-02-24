@@ -201,3 +201,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Dagster
+.tmp_dagster_home_*/
+storage/
+schedules/
+history/
